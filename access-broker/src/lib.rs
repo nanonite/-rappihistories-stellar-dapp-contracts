@@ -1,27 +1,21 @@
 #![no_std]
 
-mod errors;
-mod events;
-mod storage;
-mod types;
+pub mod errors;
+pub mod storage;
+pub mod types;
 
-use errors::ContractError;
-use soroban_sdk::{contract, contractimpl, BytesN, Env};
-use types::MarkerStatus;
+pub use errors::Error;
+pub use types::{Capability, CredentialProof, Grant, GrantType, PresenceProof, RecordMeta, Tier};
+
+use soroban_sdk::{contract, contractimpl};
 
 #[contract]
 pub struct AccessBrokerContract;
 
 #[contractimpl]
 impl AccessBrokerContract {
-    pub fn mark(env: Env, marker_id: BytesN<32>) -> Result<MarkerStatus, ContractError> {
-        storage::put_marker(&env, &marker_id);
-        events::publish_marker(&env, &marker_id);
-        Ok(MarkerStatus::Recorded)
-    }
-
-    pub fn has_marker(env: Env, marker_id: BytesN<32>) -> bool {
-        storage::has_marker(&env, &marker_id)
+    pub fn schema_version() -> u32 {
+        1
     }
 }
 

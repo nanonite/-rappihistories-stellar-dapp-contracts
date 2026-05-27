@@ -1,16 +1,163 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::BytesN as _, Env};
+use soroban_sdk::{
+    testutils::{Address as _, BytesN as _},
+    Address, Bytes, BytesN, Env, Symbol,
+};
 
 #[test]
-fn marker_smoke_test() {
+fn broker_schema_version_is_exposed() {
     let env = Env::default();
     let contract_id = env.register(AccessBrokerContract, ());
     let client = AccessBrokerContractClient::new(&env, &contract_id);
-    let marker_id = BytesN::random(&env);
 
-    assert!(!client.has_marker(&marker_id));
-    assert_eq!(client.mark(&marker_id), MarkerStatus::Recorded);
-    assert!(client.has_marker(&marker_id));
+    assert_eq!(client.schema_version(), 1);
+}
+
+#[test]
+fn tier_and_grant_codes_are_stable_for_events() {
+    assert_eq!(Tier::OfflineCard.code(), 1);
+    assert_eq!(Tier::EmergencyBundle.code(), 2);
+    assert_eq!(Tier::FullHistory.code(), 3);
+
+    assert_eq!(GrantType::Normal.code(), 1);
+    assert_eq!(GrantType::BreakGlass.code(), 2);
+    assert_eq!(GrantType::TokenlessFallback.code(), 3);
+}
+
+#[test]
+fn error_codes_match_design_catalog() {
+    assert_eq!(Error::NoSuchRecord as u32, 1);
+    assert_eq!(Error::BadCredential as u32, 2);
+    assert_eq!(Error::CredentialNotForCaller as u32, 3);
+    assert_eq!(Error::NoGrant as u32, 4);
+    assert_eq!(Error::GrantExpired as u32, 5);
+    assert_eq!(Error::GrantRevoked as u32, 6);
+    assert_eq!(Error::ScopeMismatch as u32, 7);
+    assert_eq!(Error::SensitiveNeedsExplicitGrant as u32, 8);
+    assert_eq!(Error::OfflineTierNotBrokered as u32, 9);
+    assert_eq!(Error::StalePresence as u32, 10);
+    assert_eq!(Error::WrongToken as u32, 11);
+    assert_eq!(Error::NoTokenRegistered as u32, 12);
+    assert_eq!(Error::NonceReplayed as u32, 13);
+    assert_eq!(Error::BadPresenceSig as u32, 14);
+    assert_eq!(Error::FallbackNeedsDualSign as u32, 15);
+}
+
+#[test]
+fn storage_uses_explicit_broker_storage_classes() {
+    let env = Env::default();
+    let contract_id = env.register(AccessBrokerContract, ());
+
+    env.as_contract(&contract_id, || {
+        let admin = Address::generate(&env);
+        let issuer_root = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let grantee = Address::generate(&env);
+        let record_id = BytesN::random(&env);
+        let normal_grant_id = BytesN::random(&env);
+        let break_glass_grant_id = BytesN::random(&env);
+        let nonce = BytesN::random(&env);
+        let token_pubkey = BytesN::random(&env);
+
+        storage::set_admin(&env, &admin);
+        storage::set_issuer_root(&env, &issuer_root);
+        assert_eq!(storage::get_admin(&env), Some(admin));
+        assert_eq!(storage::get_issuer_root(&env), Some(issuer_root));
+
+        let record = RecordMeta {
+            owner: owner.clone(),
+            tier: Tier::FullHistory,
+            category: Symbol::new(&env, "cardiology"),
+            sensitive: true,
+            commitment: BytesN::random(&env),
+            locator: Bytes::from_slice(&env, &[1, 2, 3, 4]),
+        };
+        storage::set_record(&env, &record_id, &record);
+        assert!(storage::has_record(&env, &record_id));
+        assert_eq!(storage::get_record(&env, &record_id), Some(record.clone()));
+
+        let normal_grant = grant(
+            &env,
+            &record_id,
+            &grantee,
+            GrantType::Normal,
+            Symbol::new(&env, "treatment"),
+            record.category.clone(),
+        );
+        storage::set_grant(&env, &normal_grant_id, &normal_grant);
+        assert!(storage::has_grant(&env, &normal_grant_id));
+        assert_eq!(
+            storage::get_grant(&env, &normal_grant_id),
+            Some(normal_grant)
+        );
+
+        let break_glass_grant = grant(
+            &env,
+            &record_id,
+            &grantee,
+            GrantType::BreakGlass,
+            Symbol::new(&env, "emergency"),
+            record.category,
+        );
+        storage::set_grant(&env, &break_glass_grant_id, &break_glass_grant);
+        assert!(storage::has_grant(&env, &break_glass_grant_id));
+        assert_eq!(
+            storage::get_grant(&env, &break_glass_grant_id),
+            Some(break_glass_grant)
+        );
+
+        storage::set_patient_token(&env, &owner, &token_pubkey);
+        assert!(storage::has_patient_token(&env, &owner));
+        assert_eq!(storage::get_patient_token(&env, &owner), Some(token_pubkey));
+
+        storage::mark_nonce_spent(&env, &nonce);
+        assert!(storage::has_spent_nonce(&env, &nonce));
+    });
+}
+
+#[test]
+fn broker_proof_and_capability_types_match_contract_boundary() {
+    let env = Env::default();
+    let subject = Address::generate(&env);
+    let cred_id = BytesN::random(&env);
+    let role = Symbol::new(&env, "clinician");
+
+    let credential = CredentialProof {
+        cred_id: cred_id.clone(),
+        role: role.clone(),
+        subject: subject.clone(),
+    };
+    assert_eq!(credential.cred_id, cred_id);
+    assert_eq!(credential.role, role);
+    assert_eq!(credential.subject, subject);
+
+    let capability = Capability {
+        grant_id: BytesN::random(&env),
+        locator: Bytes::from_slice(&env, &[9, 8, 7]),
+        commitment: BytesN::random(&env),
+    };
+    assert_eq!(capability.locator, Bytes::from_slice(&env, &[9, 8, 7]));
+}
+
+fn grant(
+    env: &Env,
+    record_id: &BytesN<32>,
+    grantee: &Address,
+    gtype: GrantType,
+    purpose: Symbol,
+    scope_category: Symbol,
+) -> Grant {
+    Grant {
+        record: record_id.clone(),
+        grantee: grantee.clone(),
+        gtype,
+        purpose,
+        scope_category,
+        expires_at: env.ledger().timestamp() + 3_600,
+        reveal_at: 0,
+        revoked: false,
+        vetoed: false,
+    }
 }
