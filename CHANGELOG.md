@@ -11,4 +11,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- IDB-2 — Identity contract implementation and tests (#2)
 - IDB-1 — Identity contract types and storage layout (#1)
