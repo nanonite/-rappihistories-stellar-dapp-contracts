@@ -255,12 +255,203 @@ fn get_patient_token_returns_error_for_missing_token() {
     );
 }
 
+#[test]
+fn create_normal_grant_stores_grant_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    register_full_history_record(&env, &client, &patient, &record_id, &category);
+
+    let grant_id = client.create_normal_grant(
+        &patient,
+        &grantee,
+        &record_id,
+        &purpose,
+        &category,
+        &expires_at,
+    );
+
+    let grant = client.get_grant(&grant_id);
+    assert_eq!(grant.record, record_id);
+    assert_eq!(grant.grantee, grantee);
+    assert_eq!(grant.gtype, GrantType::Normal);
+    assert_eq!(grant.purpose, purpose);
+    assert_eq!(grant.scope_category, category);
+    assert_eq!(grant.expires_at, expires_at);
+    assert_eq!(grant.reveal_at, 0);
+    assert!(!grant.revoked);
+    assert!(!grant.vetoed);
+}
+
+#[test]
+fn create_normal_grant_requires_existing_record() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp() + 3_600;
+
+    assert_eq!(
+        client.try_create_normal_grant(
+            &patient,
+            &grantee,
+            &record_id,
+            &purpose,
+            &category,
+            &expires_at,
+        ),
+        Err(Ok(Error::NoSuchRecord))
+    );
+}
+
+#[test]
+fn create_normal_grant_requires_record_owner() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let other_patient = Address::generate(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    register_full_history_record(&env, &client, &patient, &record_id, &category);
+
+    assert_eq!(
+        client.try_create_normal_grant(
+            &other_patient,
+            &grantee,
+            &record_id,
+            &purpose,
+            &category,
+            &expires_at,
+        ),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn create_normal_grant_rejects_expired_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp();
+    register_full_history_record(&env, &client, &patient, &record_id, &category);
+
+    assert_eq!(
+        client.try_create_normal_grant(
+            &patient,
+            &grantee,
+            &record_id,
+            &purpose,
+            &category,
+            &expires_at,
+        ),
+        Err(Ok(Error::InvalidExpiration))
+    );
+}
+
+#[test]
+fn revoke_marks_normal_grant_revoked() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    register_full_history_record(&env, &client, &patient, &record_id, &category);
+    let grant_id = client.create_normal_grant(
+        &patient,
+        &grantee,
+        &record_id,
+        &purpose,
+        &category,
+        &expires_at,
+    );
+
+    client.revoke(&patient, &grant_id);
+
+    let grant = client.get_grant(&grant_id);
+    assert!(grant.revoked);
+}
+
+#[test]
+fn revoke_requires_record_owner() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let other_owner = Address::generate(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    register_full_history_record(&env, &client, &patient, &record_id, &category);
+    let grant_id = client.create_normal_grant(
+        &patient,
+        &grantee,
+        &record_id,
+        &purpose,
+        &category,
+        &expires_at,
+    );
+
+    assert_eq!(
+        client.try_revoke(&other_owner, &grant_id),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn get_grant_returns_error_for_missing_grant() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let grant_id = BytesN::random(&env);
+
+    assert_eq!(client.try_get_grant(&grant_id), Err(Ok(Error::NoGrant)));
+}
+
 fn setup_client(env: &Env) -> (AccessBrokerContractClient<'_>, Address) {
     let contract_id = env.register(AccessBrokerContract, ());
     let client = AccessBrokerContractClient::new(env, &contract_id);
     let owner = Address::generate(env);
 
     (client, owner)
+}
+
+fn register_full_history_record(
+    env: &Env,
+    client: &AccessBrokerContractClient<'_>,
+    patient: &Address,
+    record_id: &BytesN<32>,
+    category: &Symbol,
+) {
+    let locator = Bytes::from_slice(env, &[4, 3, 2, 1]);
+    let commitment = BytesN::random(env);
+
+    client.register_record(
+        patient,
+        record_id,
+        &Tier::FullHistory,
+        category,
+        &true,
+        &locator,
+        &commitment,
+    );
 }
 
 fn grant(
