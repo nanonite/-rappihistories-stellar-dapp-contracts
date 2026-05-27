@@ -44,10 +44,12 @@
           packages = with pkgs; [
             bashInteractive
             binaryen
+            cargo-nextest
             cacert
             clang
             git
             gnumake
+            just
             lld
             pkg-config
             rustToolchain
