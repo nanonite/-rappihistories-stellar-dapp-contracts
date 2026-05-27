@@ -1,27 +1,21 @@
 #![no_std]
 
-mod errors;
-mod events;
-mod storage;
-mod types;
+pub mod errors;
+pub mod storage;
+pub mod types;
 
-use errors::ContractError;
-use soroban_sdk::{contract, contractimpl, BytesN, Env};
-use types::MarkerStatus;
+pub use errors::IdentityError;
+pub use types::{CredentialRef, CredentialStatus, IssuerRecord, Role};
+
+use soroban_sdk::{contract, contractimpl};
 
 #[contract]
 pub struct IdentityContract;
 
 #[contractimpl]
 impl IdentityContract {
-    pub fn mark(env: Env, marker_id: BytesN<32>) -> Result<MarkerStatus, ContractError> {
-        storage::put_marker(&env, &marker_id);
-        events::publish_marker(&env, &marker_id);
-        Ok(MarkerStatus::Recorded)
-    }
-
-    pub fn has_marker(env: Env, marker_id: BytesN<32>) -> bool {
-        storage::has_marker(&env, &marker_id)
+    pub fn schema_version() -> u32 {
+        1
     }
 }
 
