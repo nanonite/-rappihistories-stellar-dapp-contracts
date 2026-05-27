@@ -141,6 +141,128 @@ fn broker_proof_and_capability_types_match_contract_boundary() {
     assert_eq!(capability.locator, Bytes::from_slice(&env, &[9, 8, 7]));
 }
 
+#[test]
+fn register_record_stores_and_returns_record_meta() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, owner) = setup_client(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let locator = Bytes::from_slice(&env, &[4, 3, 2, 1]);
+    let commitment = BytesN::random(&env);
+
+    client.register_record(
+        &owner,
+        &record_id,
+        &Tier::FullHistory,
+        &category,
+        &true,
+        &locator,
+        &commitment,
+    );
+
+    let meta = client.get_record(&record_id);
+    assert_eq!(meta.owner, owner);
+    assert_eq!(meta.tier, Tier::FullHistory);
+    assert_eq!(meta.category, category);
+    assert!(meta.sensitive);
+    assert_eq!(meta.locator, locator);
+    assert_eq!(meta.commitment, commitment);
+}
+
+#[test]
+fn register_record_rejects_duplicate_record_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, owner) = setup_client(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let locator = Bytes::from_slice(&env, &[4, 3, 2, 1]);
+    let commitment = BytesN::random(&env);
+
+    client.register_record(
+        &owner,
+        &record_id,
+        &Tier::FullHistory,
+        &category,
+        &false,
+        &locator,
+        &commitment,
+    );
+
+    assert_eq!(
+        client.try_register_record(
+            &owner,
+            &record_id,
+            &Tier::FullHistory,
+            &category,
+            &false,
+            &locator,
+            &commitment,
+        ),
+        Err(Ok(Error::RecordAlreadyExists))
+    );
+}
+
+#[test]
+fn get_record_returns_error_for_missing_record() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let record_id = BytesN::random(&env);
+
+    assert_eq!(
+        client.try_get_record(&record_id),
+        Err(Ok(Error::NoSuchRecord))
+    );
+}
+
+#[test]
+fn register_patient_token_stores_and_returns_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let token_pubkey = BytesN::random(&env);
+
+    client.register_patient_token(&patient, &token_pubkey);
+
+    assert_eq!(client.get_patient_token(&patient), token_pubkey);
+}
+
+#[test]
+fn register_patient_token_rejects_duplicate_patient_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let token_pubkey = BytesN::random(&env);
+    let next_token_pubkey = BytesN::random(&env);
+
+    client.register_patient_token(&patient, &token_pubkey);
+
+    assert_eq!(
+        client.try_register_patient_token(&patient, &next_token_pubkey),
+        Err(Ok(Error::PatientTokenAlreadyRegistered))
+    );
+}
+
+#[test]
+fn get_patient_token_returns_error_for_missing_token() {
+    let env = Env::default();
+    let (client, patient) = setup_client(&env);
+
+    assert_eq!(
+        client.try_get_patient_token(&patient),
+        Err(Ok(Error::NoTokenRegistered))
+    );
+}
+
+fn setup_client(env: &Env) -> (AccessBrokerContractClient<'_>, Address) {
+    let contract_id = env.register(AccessBrokerContract, ());
+    let client = AccessBrokerContractClient::new(env, &contract_id);
+    let owner = Address::generate(env);
+
+    (client, owner)
+}
+
 fn grant(
     env: &Env,
     record_id: &BytesN<32>,
