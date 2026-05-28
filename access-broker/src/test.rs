@@ -590,6 +590,149 @@ fn revoke_requires_record_owner() {
 }
 
 #[test]
+fn open_break_glass_stores_reveal_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let responder = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "condition");
+    let purpose = Symbol::new(&env, "emergency");
+    let reveal_at = env.ledger().timestamp() + 60;
+    let expires_at = reveal_at + 300;
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::EmergencyBundle,
+        &category,
+        false,
+    );
+
+    let grant_id = client.open_break_glass(
+        &responder,
+        &patient,
+        &record_id,
+        &purpose,
+        &reveal_at,
+        &expires_at,
+    );
+
+    let grant = client.get_grant(&grant_id);
+    assert_eq!(grant.record, record_id);
+    assert_eq!(grant.grantee, responder);
+    assert_eq!(grant.gtype, GrantType::BreakGlass);
+    assert_eq!(grant.reveal_at, reveal_at);
+    assert_eq!(grant.expires_at, expires_at);
+    assert!(!grant.vetoed);
+}
+
+#[test]
+fn veto_marks_break_glass_grant_vetoed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let responder = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "condition");
+    let purpose = Symbol::new(&env, "emergency");
+    let reveal_at = env.ledger().timestamp() + 60;
+    let expires_at = reveal_at + 300;
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::EmergencyBundle,
+        &category,
+        false,
+    );
+    let grant_id = client.open_break_glass(
+        &responder,
+        &patient,
+        &record_id,
+        &purpose,
+        &reveal_at,
+        &expires_at,
+    );
+
+    client.veto(&patient, &grant_id);
+
+    let grant = client.get_grant(&grant_id);
+    assert!(grant.vetoed);
+}
+
+#[test]
+fn tokenless_fallback_requires_distinct_cosigner() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let responder = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "condition");
+    let purpose = Symbol::new(&env, "emergency");
+    let expires_at = env.ledger().timestamp() + 300;
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::EmergencyBundle,
+        &category,
+        false,
+    );
+
+    assert_eq!(
+        client.try_create_tokenless_fallback_grant(
+            &responder,
+            &responder,
+            &patient,
+            &record_id,
+            &purpose,
+            &expires_at,
+        ),
+        Err(Ok(Error::FallbackNeedsDualSign))
+    );
+}
+
+#[test]
+fn tokenless_fallback_stores_immediate_reveal_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let responder = Address::generate(&env);
+    let cosigner = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "condition");
+    let purpose = Symbol::new(&env, "emergency");
+    let expires_at = env.ledger().timestamp() + 300;
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::EmergencyBundle,
+        &category,
+        false,
+    );
+
+    let grant_id = client.create_tokenless_fallback_grant(
+        &responder,
+        &cosigner,
+        &patient,
+        &record_id,
+        &purpose,
+        &expires_at,
+    );
+
+    let grant = client.get_grant(&grant_id);
+    assert_eq!(grant.gtype, GrantType::TokenlessFallback);
+    assert_eq!(grant.grantee, responder);
+    assert_eq!(grant.reveal_at, 0);
+}
+
+#[test]
 fn get_grant_returns_error_for_missing_grant() {
     let env = Env::default();
     let (client, _) = setup_client(&env);

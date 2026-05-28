@@ -198,9 +198,11 @@ impl AccessBrokerContract {
             &grant_id,
             &record_id,
             &grantee,
+            &grant.gtype,
             &purpose,
             &scope_category,
             expires_at,
+            grant.reveal_at,
         );
         Ok(grant_id)
     }
@@ -221,6 +223,159 @@ impl AccessBrokerContract {
         grant.revoked = true;
         storage::set_grant(&env, &grant_id, &grant);
         events::publish_grant_revoked(&env, &owner, &grant_id);
+        Ok(())
+    }
+
+    pub fn open_break_glass(
+        env: Env,
+        responder: Address,
+        patient: Address,
+        record_id: BytesN<32>,
+        purpose: Symbol,
+        reveal_at: u64,
+        expires_at: u64,
+    ) -> Result<BytesN<32>, Error> {
+        responder.require_auth();
+
+        let record = storage::get_record(&env, &record_id).ok_or(Error::NoSuchRecord)?;
+        if record.owner != patient {
+            return Err(Error::Unauthorized);
+        }
+        if record.tier != Tier::EmergencyBundle {
+            return Err(Error::BadCredential);
+        }
+
+        let now = env.ledger().timestamp();
+        if reveal_at <= now {
+            return Err(Error::InvalidRevealWindow);
+        }
+        if expires_at <= reveal_at {
+            return Err(Error::InvalidExpiration);
+        }
+
+        let grant_id = explicit_grant_id(
+            &env,
+            &patient,
+            &responder,
+            &record_id,
+            &purpose,
+            GrantType::BreakGlass,
+        );
+        if storage::has_grant(&env, &grant_id) {
+            return Err(Error::GrantAlreadyExists);
+        }
+
+        let grant = Grant {
+            record: record_id.clone(),
+            grantee: responder.clone(),
+            gtype: GrantType::BreakGlass,
+            purpose: purpose.clone(),
+            scope_category: record.category.clone(),
+            expires_at,
+            reveal_at,
+            revoked: false,
+            vetoed: false,
+        };
+
+        storage::set_grant(&env, &grant_id, &grant);
+        events::publish_grant_created(
+            &env,
+            &patient,
+            &grant_id,
+            &record_id,
+            &responder,
+            &grant.gtype,
+            &purpose,
+            &grant.scope_category,
+            expires_at,
+            reveal_at,
+        );
+        Ok(grant_id)
+    }
+
+    pub fn create_tokenless_fallback_grant(
+        env: Env,
+        requester: Address,
+        cosigner: Address,
+        patient: Address,
+        record_id: BytesN<32>,
+        purpose: Symbol,
+        expires_at: u64,
+    ) -> Result<BytesN<32>, Error> {
+        if requester == cosigner {
+            return Err(Error::FallbackNeedsDualSign);
+        }
+
+        // The requester still signs the KMS release request. The on-chain
+        // safeguard here is the independent emergency cosigner.
+        cosigner.require_auth();
+
+        let record = storage::get_record(&env, &record_id).ok_or(Error::NoSuchRecord)?;
+        if record.owner != patient {
+            return Err(Error::Unauthorized);
+        }
+        if record.tier != Tier::EmergencyBundle {
+            return Err(Error::BadCredential);
+        }
+        if expires_at <= env.ledger().timestamp() {
+            return Err(Error::InvalidExpiration);
+        }
+
+        let grant_id = explicit_grant_id(
+            &env,
+            &patient,
+            &requester,
+            &record_id,
+            &purpose,
+            GrantType::TokenlessFallback,
+        );
+        if storage::has_grant(&env, &grant_id) {
+            return Err(Error::GrantAlreadyExists);
+        }
+
+        let grant = Grant {
+            record: record_id.clone(),
+            grantee: requester.clone(),
+            gtype: GrantType::TokenlessFallback,
+            purpose: purpose.clone(),
+            scope_category: record.category.clone(),
+            expires_at,
+            reveal_at: 0,
+            revoked: false,
+            vetoed: false,
+        };
+
+        storage::set_grant(&env, &grant_id, &grant);
+        events::publish_grant_created(
+            &env,
+            &patient,
+            &grant_id,
+            &record_id,
+            &requester,
+            &grant.gtype,
+            &purpose,
+            &grant.scope_category,
+            expires_at,
+            grant.reveal_at,
+        );
+        Ok(grant_id)
+    }
+
+    pub fn veto(env: Env, patient: Address, grant_id: BytesN<32>) -> Result<(), Error> {
+        patient.require_auth();
+
+        let mut grant = storage::get_grant(&env, &grant_id).ok_or(Error::NoGrant)?;
+        let record = storage::get_record(&env, &grant.record).ok_or(Error::NoSuchRecord)?;
+        if record.owner != patient {
+            return Err(Error::Unauthorized);
+        }
+        if grant.gtype != GrantType::BreakGlass && grant.gtype != GrantType::TokenlessFallback {
+            return Err(Error::BadCredential);
+        }
+
+        grant.vetoed = true;
+        storage::set_grant(&env, &grant_id, &grant);
+        events::publish_grant_vetoed(&env, &patient, &grant_id);
         Ok(())
     }
 
@@ -330,6 +485,25 @@ fn request_access_grant_id(
         record_id.clone(),
         purpose.clone(),
         cred_id.clone(),
+    )
+        .to_xdr(env);
+    env.crypto().sha256(&preimage).to_bytes()
+}
+
+fn explicit_grant_id(
+    env: &Env,
+    patient: &Address,
+    grantee: &Address,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    grant_type: GrantType,
+) -> BytesN<32> {
+    let preimage = (
+        patient.clone(),
+        grantee.clone(),
+        record_id.clone(),
+        purpose.clone(),
+        grant_type.code(),
     )
         .to_xdr(env);
     env.crypto().sha256(&preimage).to_bytes()

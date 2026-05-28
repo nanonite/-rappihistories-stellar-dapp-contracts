@@ -1,5 +1,7 @@
 use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, Symbol};
 
+use crate::types::GrantType;
+
 pub fn publish_record_registered(
     env: &Env,
     owner: &Address,
@@ -32,9 +34,11 @@ pub fn publish_grant_created(
     grant_id: &BytesN<32>,
     record_id: &BytesN<32>,
     grantee: &Address,
+    grant_type: &GrantType,
     purpose: &Symbol,
     scope_category: &Symbol,
     expires_at: u64,
+    reveal_at: u64,
 ) {
     env.events().publish(
         (symbol_short!("grant_cr"), patient.clone(), grantee.clone()),
@@ -42,9 +46,10 @@ pub fn publish_grant_created(
             grant_id.clone(),
             record_id.clone(),
             expires_at,
-            0_u64,
+            reveal_at,
             purpose.clone(),
             scope_category.clone(),
+            grant_type.code(),
         ),
     );
 }
@@ -52,6 +57,11 @@ pub fn publish_grant_created(
 pub fn publish_grant_revoked(env: &Env, owner: &Address, grant_id: &BytesN<32>) {
     env.events()
         .publish((symbol_short!("grant_rv"), owner.clone()), grant_id.clone());
+}
+
+pub fn publish_grant_vetoed(env: &Env, patient: &Address, grant_id: &BytesN<32>) {
+    env.events()
+        .publish((symbol_short!("veto"), patient.clone()), grant_id.clone());
 }
 
 pub fn publish_access_requested(
