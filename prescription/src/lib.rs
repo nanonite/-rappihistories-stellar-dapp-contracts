@@ -96,7 +96,14 @@ impl PrescriptionContract {
             status: PrescriptionStatus::Issued,
         };
         storage::set_prescription(&env, &prescription_id, &prescription);
-        events::publish_prescription_issued(&env, &prescription_id);
+        events::publish_prescription_issued(
+            &env,
+            &prescription.patient,
+            &prescription.clinician,
+            &prescription_id,
+            &prescription.diagnosis_record_id,
+            &prescription.commitment,
+        );
         Ok(())
     }
 
@@ -127,7 +134,14 @@ impl PrescriptionContract {
         prescription.unit_id = unit_id.clone();
         prescription.status = PrescriptionStatus::Reserved;
         storage::set_prescription(&env, &prescription_id, &prescription);
-        events::publish_prescription_reserved(&env, &prescription_id, &unit_id);
+        events::publish_prescription_reserved(
+            &env,
+            &prescription.patient,
+            &prescription.pharmacy,
+            &prescription_id,
+            &prescription.unit_id,
+            &reservation_ref,
+        );
         Ok(())
     }
 
@@ -176,7 +190,14 @@ impl PrescriptionContract {
         prescription.receipt_record_id = receipt_record_id.clone();
         prescription.status = PrescriptionStatus::Dispensed;
         storage::set_prescription(&env, &prescription_id, &prescription);
-        events::publish_prescription_dispensed(&env, &prescription_id, &receipt_record_id);
+        events::publish_prescription_dispensed(
+            &env,
+            &prescription.patient,
+            &prescription.pharmacy,
+            &prescription_id,
+            &prescription.unit_id,
+            &prescription.receipt_record_id,
+        );
         Ok(())
     }
 
