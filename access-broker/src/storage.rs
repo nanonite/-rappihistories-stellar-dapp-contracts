@@ -1,6 +1,6 @@
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
 
-use crate::types::{Grant, GrantType, RecordMeta};
+use crate::types::{Grant, GrantType, RecordMeta, WriteGrant};
 
 pub const MAX_PRESENCE_WINDOW: u32 = 300;
 pub const CRITICAL_STATE_TTL_THRESHOLD: u32 = 10_000;
@@ -9,11 +9,13 @@ pub const CRITICAL_STATE_TTL_EXTEND_TO: u32 = 120_960;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-    Admin,                  // instance storage: Address, always alive
-    IssuerRoot,             // instance storage: Address, always alive
-    Record(BytesN<32>),     // persistent storage: RecordMeta
-    Grant(BytesN<32>),      // persistent for Normal; temporary for BreakGlass/TokenlessFallback
-    PatientToken(Address),  // persistent storage: BytesN<32>
+    Admin,                   // instance storage: Address, always alive
+    IssuerRoot,              // instance storage: Address, always alive
+    Record(BytesN<32>),      // persistent storage: RecordMeta
+    SubjectRecords(Address), // persistent storage: Vec<BytesN<32>>
+    Grant(BytesN<32>), // persistent for Normal/Write; temporary for BreakGlass/TokenlessFallback
+    WriteGrant(BytesN<32>), // persistent storage: WriteGrant
+    PatientToken(Address), // persistent storage: BytesN<32>
     SpentNonce(BytesN<32>), // temporary storage: bool, replay guard
 }
 
@@ -40,6 +42,7 @@ pub fn set_record(env: &Env, record_id: &BytesN<32>, meta: &RecordMeta) {
     env.storage()
         .persistent()
         .set(&DataKey::Record(record_id.clone()), meta);
+    push_subject_record(env, &meta.subject, record_id);
     renew_record(env, record_id);
 }
 
@@ -61,6 +64,7 @@ pub fn set_grant(env: &Env, grant_id: &BytesN<32>, grant: &Grant) {
         GrantType::BreakGlass | GrantType::TokenlessFallback => {
             set_temporary_grant(env, grant_id, grant)
         }
+        GrantType::Write => set_normal_grant(env, grant_id, grant),
     }
 }
 
@@ -87,6 +91,42 @@ pub fn get_grant(env: &Env, grant_id: &BytesN<32>) -> Option<Grant> {
 pub fn has_grant(env: &Env, grant_id: &BytesN<32>) -> bool {
     let key = DataKey::Grant(grant_id.clone());
     env.storage().persistent().has(&key) || env.storage().temporary().has(&key)
+}
+
+pub fn set_write_grant(env: &Env, grant_id: &BytesN<32>, grant: &WriteGrant) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::WriteGrant(grant_id.clone()), grant);
+    renew_write_grant(env, grant_id);
+}
+
+pub fn get_write_grant(env: &Env, grant_id: &BytesN<32>) -> Option<WriteGrant> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::WriteGrant(grant_id.clone()))
+}
+
+pub fn has_write_grant(env: &Env, grant_id: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::WriteGrant(grant_id.clone()))
+}
+
+pub fn list_subject_records(env: &Env, subject: &Address) -> Vec<(BytesN<32>, RecordMeta)> {
+    let ids: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::SubjectRecords(subject.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+    let mut records = Vec::new(env);
+
+    for id in ids {
+        if let Some(record) = get_record(env, &id) {
+            records.push_back((id, record));
+        }
+    }
+
+    records
 }
 
 pub fn set_patient_token(env: &Env, patient: &Address, token_pubkey: &BytesN<32>) {
@@ -140,6 +180,17 @@ pub fn renew_record(env: &Env, record_id: &BytesN<32>) {
     }
 }
 
+pub fn renew_write_grant(env: &Env, grant_id: &BytesN<32>) {
+    let key = DataKey::WriteGrant(grant_id.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(
+            &key,
+            CRITICAL_STATE_TTL_THRESHOLD,
+            CRITICAL_STATE_TTL_EXTEND_TO,
+        );
+    }
+}
+
 pub fn renew_patient_token(env: &Env, patient: &Address) {
     let key = DataKey::PatientToken(patient.clone());
     if env.storage().persistent().has(&key) {
@@ -168,4 +219,21 @@ pub fn renew_active_normal_grant(env: &Env, grant_id: &BytesN<32>, grant: &Grant
             CRITICAL_STATE_TTL_EXTEND_TO,
         );
     }
+}
+
+fn push_subject_record(env: &Env, subject: &Address, record_id: &BytesN<32>) {
+    let key = DataKey::SubjectRecords(subject.clone());
+    let mut ids: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    ids.push_back(record_id.clone());
+    env.storage().persistent().set(&key, &ids);
+    env.storage().persistent().extend_ttl(
+        &key,
+        CRITICAL_STATE_TTL_THRESHOLD,
+        CRITICAL_STATE_TTL_EXTEND_TO,
+    );
 }

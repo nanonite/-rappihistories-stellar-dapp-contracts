@@ -4,21 +4,49 @@ use crate::types::GrantType;
 
 pub fn publish_record_registered(
     env: &Env,
-    owner: &Address,
+    subject: &Address,
     record_id: &BytesN<32>,
     tier_code: u32,
     category: &Symbol,
     locator: &Bytes,
     commitment: &BytesN<32>,
+    created_at: u64,
 ) {
     env.events().publish(
-        (symbol_short!("rec_reg"), owner.clone()),
+        (symbol_short!("rec_reg"), subject.clone()),
         (
             record_id.clone(),
             tier_code,
             category.clone(),
             locator.clone(),
             commitment.clone(),
+            created_at,
+        ),
+    );
+}
+
+pub fn publish_record_appended(
+    env: &Env,
+    subject: &Address,
+    author: &Address,
+    write_grant_id: &BytesN<32>,
+    record_id: &BytesN<32>,
+    tier_code: u32,
+    category: &Symbol,
+    locator: &Bytes,
+    commitment: &BytesN<32>,
+    created_at: u64,
+) {
+    env.events().publish(
+        (symbol_short!("rec_app"), subject.clone(), author.clone()),
+        (
+            record_id.clone(),
+            write_grant_id.clone(),
+            tier_code,
+            category.clone(),
+            locator.clone(),
+            commitment.clone(),
+            created_at,
         ),
     );
 }
@@ -57,6 +85,33 @@ pub fn publish_grant_created(
 pub fn publish_grant_revoked(env: &Env, owner: &Address, grant_id: &BytesN<32>) {
     env.events()
         .publish((symbol_short!("grant_rv"), owner.clone()), grant_id.clone());
+}
+
+pub fn publish_write_grant_created(
+    env: &Env,
+    subject: &Address,
+    grantee: &Address,
+    grant_id: &BytesN<32>,
+    scope_category: &Symbol,
+    expires_at: u64,
+    created_at: u64,
+) {
+    env.events().publish(
+        (symbol_short!("write_gr"), subject.clone(), grantee.clone()),
+        (
+            grant_id.clone(),
+            scope_category.clone(),
+            expires_at,
+            created_at,
+        ),
+    );
+}
+
+pub fn publish_write_grant_revoked(env: &Env, subject: &Address, grant_id: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("wrgr_rv"), subject.clone()),
+        grant_id.clone(),
+    );
 }
 
 pub fn publish_grant_vetoed(env: &Env, patient: &Address, grant_id: &BytesN<32>) {

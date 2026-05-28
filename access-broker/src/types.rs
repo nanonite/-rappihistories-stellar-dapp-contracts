@@ -24,6 +24,7 @@ pub enum GrantType {
     Normal,
     BreakGlass,
     TokenlessFallback,
+    Write,
 }
 
 impl GrantType {
@@ -32,6 +33,7 @@ impl GrantType {
             Self::Normal => 1,
             Self::BreakGlass => 2,
             Self::TokenlessFallback => 3,
+            Self::Write => 4,
         }
     }
 }
@@ -39,12 +41,15 @@ impl GrantType {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordMeta {
-    pub owner: Address,
+    pub subject: Address,
+    pub author: Address,
     pub tier: Tier,
     pub category: Symbol,
     pub sensitive: bool,
     pub commitment: BytesN<32>,
     pub locator: Bytes,
+    pub created_at: u64,
+    pub write_grant_id: BytesN<32>,
 }
 
 #[contracttype]
@@ -59,6 +64,17 @@ pub struct Grant {
     pub reveal_at: u64,
     pub revoked: bool,
     pub vetoed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteGrant {
+    pub subject: Address,
+    pub grantee: Address,
+    pub scope_category: Symbol,
+    pub expires_at: u64,
+    pub revoked: bool,
+    pub created_at: u64,
 }
 
 #[contracttype]

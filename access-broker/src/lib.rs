@@ -6,7 +6,9 @@ pub mod storage;
 pub mod types;
 
 pub use errors::Error;
-pub use types::{Capability, CredentialProof, Grant, GrantType, PresenceProof, RecordMeta, Tier};
+pub use types::{
+    Capability, CredentialProof, Grant, GrantType, PresenceProof, RecordMeta, Tier, WriteGrant,
+};
 
 use soroban_sdk::{contract, contractimpl, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol, Vec};
 
@@ -98,13 +100,17 @@ impl AccessBrokerContract {
             return Err(Error::RecordAlreadyExists);
         }
 
+        let created_at = env.ledger().timestamp();
         let meta = RecordMeta {
-            owner: owner.clone(),
+            subject: owner.clone(),
+            author: owner.clone(),
             tier: tier.clone(),
             category: category.clone(),
             sensitive,
             commitment: commitment.clone(),
             locator: locator_bytes.clone(),
+            created_at,
+            write_grant_id: BytesN::from_array(&env, &[0; 32]),
         };
 
         storage::set_record(&env, &record_id, &meta);
@@ -116,12 +122,17 @@ impl AccessBrokerContract {
             &category,
             &locator_bytes,
             &commitment,
+            created_at,
         );
         Ok(())
     }
 
     pub fn get_record(env: Env, record_id: BytesN<32>) -> Result<RecordMeta, Error> {
         storage::get_record(&env, &record_id).ok_or(Error::NoSuchRecord)
+    }
+
+    pub fn list_records(env: Env, subject: Address) -> Vec<(BytesN<32>, RecordMeta)> {
+        storage::list_subject_records(&env, &subject)
     }
 
     pub fn register_patient_token(
@@ -156,7 +167,7 @@ impl AccessBrokerContract {
         patient.require_auth();
 
         let record = storage::get_record(&env, &record_id).ok_or(Error::NoSuchRecord)?;
-        if record.owner != patient {
+        if record.subject != patient {
             return Err(Error::Unauthorized);
         }
 
@@ -211,12 +222,133 @@ impl AccessBrokerContract {
         storage::get_grant(&env, &grant_id).ok_or(Error::NoGrant)
     }
 
+    pub fn create_write_grant(
+        env: Env,
+        subject: Address,
+        grantee: Address,
+        scope_category: Symbol,
+        expires_at: u64,
+    ) -> Result<BytesN<32>, Error> {
+        subject.require_auth();
+
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            return Err(Error::InvalidExpiration);
+        }
+
+        let preimage = (
+            subject.clone(),
+            grantee.clone(),
+            scope_category.clone(),
+            expires_at,
+            GrantType::Write.code(),
+        )
+            .to_xdr(&env);
+        let grant_id = env.crypto().sha256(&preimage).to_bytes();
+        if storage::has_write_grant(&env, &grant_id) {
+            return Err(Error::GrantAlreadyExists);
+        }
+
+        let write_grant = WriteGrant {
+            subject: subject.clone(),
+            grantee: grantee.clone(),
+            scope_category: scope_category.clone(),
+            expires_at,
+            revoked: false,
+            created_at: now,
+        };
+
+        storage::set_write_grant(&env, &grant_id, &write_grant);
+        events::publish_write_grant_created(
+            &env,
+            &subject,
+            &grantee,
+            &grant_id,
+            &scope_category,
+            expires_at,
+            now,
+        );
+        Ok(grant_id)
+    }
+
+    pub fn get_write_grant(env: Env, grant_id: BytesN<32>) -> Result<WriteGrant, Error> {
+        storage::get_write_grant(&env, &grant_id).ok_or(Error::NoGrant)
+    }
+
+    pub fn revoke_write_grant(
+        env: Env,
+        subject: Address,
+        grant_id: BytesN<32>,
+    ) -> Result<(), Error> {
+        subject.require_auth();
+
+        let mut write_grant = storage::get_write_grant(&env, &grant_id).ok_or(Error::NoGrant)?;
+        if write_grant.subject != subject {
+            return Err(Error::Unauthorized);
+        }
+
+        write_grant.revoked = true;
+        storage::set_write_grant(&env, &grant_id, &write_grant);
+        events::publish_write_grant_revoked(&env, &subject, &grant_id);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_record(
+        env: Env,
+        author: Address,
+        subject: Address,
+        write_grant_id: BytesN<32>,
+        record_id: BytesN<32>,
+        tier: Tier,
+        category: Symbol,
+        locator_bytes: Bytes,
+        commitment: BytesN<32>,
+    ) -> Result<(), Error> {
+        author.require_auth();
+
+        if storage::has_record(&env, &record_id) {
+            return Err(Error::RecordAlreadyExists);
+        }
+
+        let write_grant = storage::get_write_grant(&env, &write_grant_id).ok_or(Error::NoGrant)?;
+        validate_write_grant(&env, &write_grant, &author, &subject, &category)?;
+
+        let created_at = env.ledger().timestamp();
+        let meta = RecordMeta {
+            subject: subject.clone(),
+            author: author.clone(),
+            tier: tier.clone(),
+            category: category.clone(),
+            sensitive: true,
+            commitment: commitment.clone(),
+            locator: locator_bytes.clone(),
+            created_at,
+            write_grant_id: write_grant_id.clone(),
+        };
+
+        storage::set_record(&env, &record_id, &meta);
+        events::publish_record_appended(
+            &env,
+            &subject,
+            &author,
+            &write_grant_id,
+            &record_id,
+            tier.code(),
+            &category,
+            &locator_bytes,
+            &commitment,
+            created_at,
+        );
+        Ok(())
+    }
+
     pub fn revoke(env: Env, owner: Address, grant_id: BytesN<32>) -> Result<(), Error> {
         owner.require_auth();
 
         let mut grant = storage::get_grant(&env, &grant_id).ok_or(Error::NoGrant)?;
         let record = storage::get_record(&env, &grant.record).ok_or(Error::NoSuchRecord)?;
-        if record.owner != owner {
+        if record.subject != owner {
             return Err(Error::Unauthorized);
         }
 
@@ -238,7 +370,7 @@ impl AccessBrokerContract {
         responder.require_auth();
 
         let record = storage::get_record(&env, &record_id).ok_or(Error::NoSuchRecord)?;
-        if record.owner != patient {
+        if record.subject != patient {
             return Err(Error::Unauthorized);
         }
         if record.tier != Tier::EmergencyBundle {
@@ -311,7 +443,7 @@ impl AccessBrokerContract {
         cosigner.require_auth();
 
         let record = storage::get_record(&env, &record_id).ok_or(Error::NoSuchRecord)?;
-        if record.owner != patient {
+        if record.subject != patient {
             return Err(Error::Unauthorized);
         }
         if record.tier != Tier::EmergencyBundle {
@@ -366,7 +498,7 @@ impl AccessBrokerContract {
 
         let mut grant = storage::get_grant(&env, &grant_id).ok_or(Error::NoGrant)?;
         let record = storage::get_record(&env, &grant.record).ok_or(Error::NoSuchRecord)?;
-        if record.owner != patient {
+        if record.subject != patient {
             return Err(Error::Unauthorized);
         }
         if grant.gtype != GrantType::BreakGlass && grant.gtype != GrantType::TokenlessFallback {
@@ -439,7 +571,7 @@ fn prepare_request_access(
 ) -> Result<PreparedAccess, Error> {
     verify_credential(env, requester, cred)?;
     let record = storage::get_record(env, record_id).ok_or(Error::NoSuchRecord)?;
-    verify_presence(env, requester, record_id, &record.owner, presence)?;
+    verify_presence(env, requester, record_id, &record.subject, presence)?;
 
     let grant_id = request_access_grant_id(env, requester, record_id, purpose, &cred.cred_id);
     if let Some(grant) = storage::get_grant(env, &grant_id) {
@@ -572,6 +704,29 @@ fn validate_grant(
         return Err(Error::NoGrant);
     }
     if record.sensitive && grant.scope_category != record.category {
+        return Err(Error::ScopeMismatch);
+    }
+
+    Ok(())
+}
+
+fn validate_write_grant(
+    env: &Env,
+    grant: &WriteGrant,
+    author: &Address,
+    subject: &Address,
+    category: &Symbol,
+) -> Result<(), Error> {
+    if grant.subject != *subject || grant.grantee != *author {
+        return Err(Error::NoGrant);
+    }
+    if grant.revoked {
+        return Err(Error::GrantRevoked);
+    }
+    if env.ledger().timestamp() >= grant.expires_at {
+        return Err(Error::GrantExpired);
+    }
+    if grant.scope_category != *category {
         return Err(Error::ScopeMismatch);
     }
 

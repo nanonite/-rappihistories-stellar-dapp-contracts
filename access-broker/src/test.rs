@@ -32,6 +32,7 @@ fn tier_and_grant_codes_are_stable_for_events() {
     assert_eq!(GrantType::Normal.code(), 1);
     assert_eq!(GrantType::BreakGlass.code(), 2);
     assert_eq!(GrantType::TokenlessFallback.code(), 3);
+    assert_eq!(GrantType::Write.code(), 4);
 }
 
 #[test]
@@ -75,12 +76,15 @@ fn storage_uses_explicit_broker_storage_classes() {
         assert_eq!(storage::get_issuer_root(&env), Some(issuer_root));
 
         let record = RecordMeta {
-            owner: owner.clone(),
+            subject: owner.clone(),
+            author: owner.clone(),
             tier: Tier::FullHistory,
             category: Symbol::new(&env, "cardiology"),
             sensitive: true,
             commitment: BytesN::random(&env),
             locator: Bytes::from_slice(&env, &[1, 2, 3, 4]),
+            created_at: env.ledger().timestamp(),
+            write_grant_id: BytesN::from_array(&env, &[0; 32]),
         };
         storage::set_record(&env, &record_id, &record);
         assert!(storage::has_record(&env, &record_id));
@@ -141,12 +145,15 @@ fn critical_broker_state_is_renewed_on_write() {
         let token_pubkey = BytesN::random(&env);
         let category = Symbol::new(&env, "cardiology");
         let record = RecordMeta {
-            owner: patient.clone(),
+            subject: patient.clone(),
+            author: patient.clone(),
             tier: Tier::FullHistory,
             category: category.clone(),
             sensitive: false,
             commitment: BytesN::random(&env),
             locator: Bytes::from_slice(&env, &[1, 2, 3]),
+            created_at: env.ledger().timestamp(),
+            write_grant_id: BytesN::from_array(&env, &[0; 32]),
         };
         let normal_grant = grant(
             &env,
@@ -301,7 +308,8 @@ fn register_record_stores_and_returns_record_meta() {
     );
 
     let meta = client.get_record(&record_id);
-    assert_eq!(meta.owner, owner);
+    assert_eq!(meta.subject, owner);
+    assert_eq!(meta.author, owner);
     assert_eq!(meta.tier, Tier::FullHistory);
     assert_eq!(meta.category, category);
     assert!(meta.sensitive);
@@ -533,6 +541,150 @@ fn create_normal_grant_rejects_duplicate_grant_id() {
             &expires_at,
         ),
         Err(Ok(Error::GrantAlreadyExists))
+    );
+}
+
+#[test]
+fn create_write_grant_stores_grant_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let clinician = Address::generate(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let expires_at = env.ledger().timestamp() + 3_600;
+
+    let grant_id = client.create_write_grant(&patient, &clinician, &category, &expires_at);
+    let grant = client.get_write_grant(&grant_id);
+
+    assert_eq!(grant.subject, patient);
+    assert_eq!(grant.grantee, clinician);
+    assert_eq!(grant.scope_category, category);
+    assert_eq!(grant.expires_at, expires_at);
+    assert!(!grant.revoked);
+}
+
+#[test]
+fn append_record_stores_doctor_authored_record_under_patient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let clinician = Address::generate(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    let write_grant_id = client.create_write_grant(&patient, &clinician, &category, &expires_at);
+    let record_id = BytesN::random(&env);
+    let locator = Bytes::from_slice(&env, b"opaque://append/1");
+    let commitment = BytesN::random(&env);
+
+    client.append_record(
+        &clinician,
+        &patient,
+        &write_grant_id,
+        &record_id,
+        &Tier::FullHistory,
+        &category,
+        &locator,
+        &commitment,
+    );
+
+    let meta = client.get_record(&record_id);
+    assert_eq!(meta.subject, patient);
+    assert_eq!(meta.author, clinician);
+    assert_eq!(meta.write_grant_id, write_grant_id);
+    assert_eq!(meta.category, category);
+    assert_eq!(meta.locator, locator);
+    assert_eq!(meta.commitment, commitment);
+    assert_eq!(client.list_records(&patient).len(), 1);
+}
+
+#[test]
+fn append_record_rejects_revoked_write_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let clinician = Address::generate(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    let write_grant_id = client.create_write_grant(&patient, &clinician, &category, &expires_at);
+    client.revoke_write_grant(&patient, &write_grant_id);
+
+    assert_eq!(
+        client.try_append_record(
+            &clinician,
+            &patient,
+            &write_grant_id,
+            &BytesN::random(&env),
+            &Tier::FullHistory,
+            &category,
+            &Bytes::from_slice(&env, b"opaque://append/revoked"),
+            &BytesN::random(&env),
+        ),
+        Err(Ok(Error::GrantRevoked))
+    );
+}
+
+#[test]
+fn append_record_rejects_expired_write_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(100);
+    let (client, patient) = setup_client(&env);
+    let clinician = Address::generate(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let write_grant_id = client.create_write_grant(&patient, &clinician, &category, &101);
+    env.ledger().set_timestamp(101);
+
+    assert_eq!(
+        client.try_append_record(
+            &clinician,
+            &patient,
+            &write_grant_id,
+            &BytesN::random(&env),
+            &Tier::FullHistory,
+            &category,
+            &Bytes::from_slice(&env, b"opaque://append/expired"),
+            &BytesN::random(&env),
+        ),
+        Err(Ok(Error::GrantExpired))
+    );
+}
+
+#[test]
+fn append_record_rejects_wrong_category_and_stale_grant_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let clinician = Address::generate(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let wrong_category = Symbol::new(&env, "imaging");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    let write_grant_id = client.create_write_grant(&patient, &clinician, &category, &expires_at);
+
+    assert_eq!(
+        client.try_append_record(
+            &clinician,
+            &patient,
+            &write_grant_id,
+            &BytesN::random(&env),
+            &Tier::FullHistory,
+            &wrong_category,
+            &Bytes::from_slice(&env, b"opaque://append/wrong-category"),
+            &BytesN::random(&env),
+        ),
+        Err(Ok(Error::ScopeMismatch))
+    );
+    assert_eq!(
+        client.try_append_record(
+            &clinician,
+            &patient,
+            &BytesN::random(&env),
+            &BytesN::random(&env),
+            &Tier::FullHistory,
+            &category,
+            &Bytes::from_slice(&env, b"opaque://append/no-grant"),
+            &BytesN::random(&env),
+        ),
+        Err(Ok(Error::NoGrant))
     );
 }
 
