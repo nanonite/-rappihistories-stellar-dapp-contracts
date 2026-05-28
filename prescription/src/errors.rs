@@ -8,4 +8,9 @@ pub enum ContractError {
     AlreadyInitialized = 2,
     NotInitialized = 3,
     Unauthorized = 4,
+    PrescriptionAlreadyExists = 5,
+    NoSuchPrescription = 6,
+    InvalidState = 7,
+    WrongPatient = 8,
+    WrongPharmacy = 9,
 }

@@ -1,3 +1,4 @@
+use crate::types::Prescription;
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 #[contracttype]
@@ -6,6 +7,7 @@ pub enum DataKey {
     IdentityContractId,
     AccessBrokerContractId,
     SupplychainContractId,
+    Prescription(BytesN<32>),
     Marker(BytesN<32>),
 }
 
@@ -48,6 +50,25 @@ pub fn get_supplychain_contract_id(env: &Env) -> Option<Address> {
     env.storage()
         .instance()
         .get(&DataKey::SupplychainContractId)
+}
+
+pub fn has_prescription(env: &Env, prescription_id: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::Prescription(prescription_id.clone()))
+}
+
+pub fn set_prescription(env: &Env, prescription_id: &BytesN<32>, prescription: &Prescription) {
+    env.storage().persistent().set(
+        &DataKey::Prescription(prescription_id.clone()),
+        prescription,
+    );
+}
+
+pub fn get_prescription(env: &Env, prescription_id: &BytesN<32>) -> Option<Prescription> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Prescription(prescription_id.clone()))
 }
 
 pub fn put_marker(env: &Env, marker_id: &BytesN<32>) {

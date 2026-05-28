@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- E2E-4 prescription bridge contract surfaces (#27)
 - E2E-3 break-glass veto contract events (#26)
 - E2E-2B access-broker event payloads (#24)
 - INF — Cache contract-runner dependency layer (#25)
