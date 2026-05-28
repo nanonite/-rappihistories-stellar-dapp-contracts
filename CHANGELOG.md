@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- BKR-4 — request_access and the on-chain predicate check (#6)
 - BKR-3 — Normal grant creation (Tier 3) (#5)
 - BKR-2 — Record registration and patient token registration (#4)
 - BKR-1 — Broker types, storage layout, and errors (#3)

@@ -1,10 +1,15 @@
 #![cfg(test)]
 
+extern crate std;
+
 use super::*;
+use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
-    testutils::{Address as _, BytesN as _},
+    testutils::{Address as _, BytesN as _, Events as _},
     Address, Bytes, BytesN, Env, Symbol,
 };
+
+const PRESENCE_SIGNING_KEY: [u8; 32] = [7; 32];
 
 #[test]
 fn broker_schema_version_is_exposed() {
@@ -364,6 +369,40 @@ fn create_normal_grant_rejects_expired_grant() {
 }
 
 #[test]
+fn create_normal_grant_rejects_duplicate_grant_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let grantee = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let expires_at = env.ledger().timestamp() + 3_600;
+    register_full_history_record(&env, &client, &patient, &record_id, &category);
+
+    client.create_normal_grant(
+        &patient,
+        &grantee,
+        &record_id,
+        &purpose,
+        &category,
+        &expires_at,
+    );
+
+    assert_eq!(
+        client.try_create_normal_grant(
+            &patient,
+            &grantee,
+            &record_id,
+            &purpose,
+            &category,
+            &expires_at,
+        ),
+        Err(Ok(Error::GrantAlreadyExists))
+    );
+}
+
+#[test]
 fn revoke_marks_normal_grant_revoked() {
     let env = Env::default();
     env.mock_all_auths();
@@ -425,12 +464,471 @@ fn get_grant_returns_error_for_missing_grant() {
     assert_eq!(client.try_get_grant(&grant_id), Err(Ok(Error::NoGrant)));
 }
 
+#[test]
+fn request_access_stores_grant_emits_audit_and_returns_capability() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    let (locator, commitment) = register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    let capability = client.request_access(&requester, &record_id, &purpose, &cred, &presence);
+
+    assert_eq!(env.events().all().len(), 1);
+    assert_eq!(capability.locator, locator);
+    assert_eq!(capability.commitment, commitment);
+
+    let grant = client.get_grant(&capability.grant_id);
+    assert_eq!(grant.record, record_id);
+    assert_eq!(grant.grantee, requester);
+    assert_eq!(grant.gtype, GrantType::Normal);
+    assert_eq!(grant.purpose, purpose);
+    assert_eq!(grant.scope_category, category);
+    assert!(!grant.revoked);
+    assert!(!grant.vetoed);
+}
+
+#[test]
+fn request_access_simulation_preparation_does_not_commit_or_emit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id, patient) = setup_client_with_id(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    env.as_contract(&contract_id, || {
+        let prepared =
+            prepare_request_access(&env, &requester, &record_id, &purpose, &cred, &presence)
+                .unwrap();
+        assert!(!storage::has_grant(&env, &prepared.grant_id));
+        assert!(!storage::has_spent_nonce(&env, &presence.nonce));
+    });
+
+    assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn request_access_rejects_missing_record() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let purpose = Symbol::new(&env, "treatment");
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::NoSuchRecord))
+    );
+}
+
+#[test]
+fn request_access_rejects_bad_credential() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    let cred = CredentialProof {
+        cred_id: BytesN::from_array(&env, &[0; 32]),
+        role: Symbol::new(&env, "clinician"),
+        subject: requester.clone(),
+    };
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::BadCredential))
+    );
+}
+
+#[test]
+fn request_access_rejects_credential_for_different_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let other_subject = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let purpose = Symbol::new(&env, "treatment");
+    let cred = CredentialProof {
+        cred_id: BytesN::random(&env),
+        role: Symbol::new(&env, "clinician"),
+        subject: other_subject,
+    };
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::CredentialNotForCaller))
+    );
+}
+
+#[test]
+fn request_access_rejects_missing_patient_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::NoTokenRegistered))
+    );
+}
+
+#[test]
+fn request_access_rejects_wrong_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    client.register_patient_token(&patient, &BytesN::random(&env));
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::WrongToken))
+    );
+}
+
+#[test]
+fn request_access_rejects_stale_presence() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp());
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::StalePresence))
+    );
+}
+
+#[test]
+fn request_access_rejects_bad_presence_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let mut presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+    presence.signature = BytesN::from_array(&env, &[0; 64]);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::BadPresenceSig))
+    );
+}
+
+#[test]
+fn request_access_rejects_nonce_replay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+    client.request_access(&requester, &record_id, &purpose, &cred, &presence);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::NonceReplayed))
+    );
+}
+
+#[test]
+fn request_access_rejects_offline_tier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::OfflineCard,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::OfflineTierNotBrokered))
+    );
+}
+
+#[test]
+fn request_access_rejects_sensitive_without_explicit_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, patient) = setup_client(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        true,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &category, &cred, &presence),
+        Err(Ok(Error::SensitiveNeedsExplicitGrant))
+    );
+}
+
+#[test]
+fn request_access_rejects_sensitive_scope_mismatch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id, patient) = setup_client_with_id(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        true,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+    store_request_grant(
+        &env,
+        &contract_id,
+        &requester,
+        &record_id,
+        &purpose,
+        &cred,
+        Symbol::new(&env, "allergy"),
+        false,
+        env.ledger().timestamp() + 300,
+    );
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::ScopeMismatch))
+    );
+}
+
+#[test]
+fn request_access_rejects_expired_existing_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id, patient) = setup_client_with_id(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+    store_request_grant(
+        &env,
+        &contract_id,
+        &requester,
+        &record_id,
+        &purpose,
+        &cred,
+        category,
+        false,
+        env.ledger().timestamp(),
+    );
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::GrantExpired))
+    );
+}
+
+#[test]
+fn request_access_rejects_revoked_existing_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id, patient) = setup_client_with_id(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "cardiology");
+    let purpose = Symbol::new(&env, "treatment");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::FullHistory,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "clinician");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+    store_request_grant(
+        &env,
+        &contract_id,
+        &requester,
+        &record_id,
+        &purpose,
+        &cred,
+        category,
+        true,
+        env.ledger().timestamp() + 300,
+    );
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::GrantRevoked))
+    );
+}
+
 fn setup_client(env: &Env) -> (AccessBrokerContractClient<'_>, Address) {
+    let (client, _, owner) = setup_client_with_id(env);
+    (client, owner)
+}
+
+fn setup_client_with_id(env: &Env) -> (AccessBrokerContractClient<'_>, Address, Address) {
     let contract_id = env.register(AccessBrokerContract, ());
     let client = AccessBrokerContractClient::new(env, &contract_id);
     let owner = Address::generate(env);
 
-    (client, owner)
+    (client, contract_id, owner)
 }
 
 fn register_full_history_record(
@@ -452,6 +950,102 @@ fn register_full_history_record(
         &locator,
         &commitment,
     );
+}
+
+fn register_broker_record(
+    env: &Env,
+    client: &AccessBrokerContractClient<'_>,
+    patient: &Address,
+    record_id: &BytesN<32>,
+    tier: Tier,
+    category: &Symbol,
+    sensitive: bool,
+) -> (Bytes, BytesN<32>) {
+    let locator = Bytes::from_slice(env, &[4, 3, 2, 1]);
+    let commitment = BytesN::random(env);
+
+    client.register_record(
+        patient,
+        record_id,
+        &tier,
+        category,
+        &sensitive,
+        &locator,
+        &commitment,
+    );
+
+    (locator, commitment)
+}
+
+fn register_patient_token(env: &Env, client: &AccessBrokerContractClient<'_>, patient: &Address) {
+    let signing_key = presence_signing_key();
+    let token_pubkey = BytesN::from_array(env, &signing_key.verifying_key().to_bytes());
+    client.register_patient_token(patient, &token_pubkey);
+}
+
+fn credential(env: &Env, subject: &Address, role: &str) -> CredentialProof {
+    CredentialProof {
+        cred_id: BytesN::random(env),
+        role: Symbol::new(env, role),
+        subject: subject.clone(),
+    }
+}
+
+fn presence(
+    env: &Env,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    expires_at: u64,
+) -> PresenceProof {
+    let signing_key = presence_signing_key();
+    let token_pubkey = BytesN::from_array(env, &signing_key.verifying_key().to_bytes());
+    let nonce = BytesN::random(env);
+    let mut proof = PresenceProof {
+        token_pubkey,
+        nonce,
+        expires_at,
+        signature: BytesN::from_array(env, &[0; 64]),
+    };
+    let message = presence_message(env, requester, record_id, &proof);
+    let mut message_bytes = std::vec![0; message.len() as usize];
+    message.copy_into_slice(&mut message_bytes);
+    let signature = signing_key.sign(&message_bytes);
+    proof.signature = BytesN::from_array(env, &signature.to_bytes());
+
+    proof
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_request_grant(
+    env: &Env,
+    contract_id: &Address,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    cred: &CredentialProof,
+    scope_category: Symbol,
+    revoked: bool,
+    expires_at: u64,
+) {
+    env.as_contract(contract_id, || {
+        let grant_id = request_access_grant_id(env, requester, record_id, purpose, &cred.cred_id);
+        let grant = Grant {
+            record: record_id.clone(),
+            grantee: requester.clone(),
+            gtype: GrantType::Normal,
+            purpose: purpose.clone(),
+            scope_category,
+            expires_at,
+            reveal_at: 0,
+            revoked,
+            vetoed: false,
+        };
+        storage::set_grant(env, &grant_id, &grant);
+    });
+}
+
+fn presence_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&PRESENCE_SIGNING_KEY)
 }
 
 fn grant(

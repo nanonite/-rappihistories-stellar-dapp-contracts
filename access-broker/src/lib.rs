@@ -10,6 +10,8 @@ pub use types::{Capability, CredentialProof, Grant, GrantType, PresenceProof, Re
 
 use soroban_sdk::{contract, contractimpl, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol};
 
+const REQUEST_GRANT_SECONDS: u64 = 300;
+
 #[contract]
 pub struct AccessBrokerContract;
 
@@ -136,6 +138,237 @@ impl AccessBrokerContract {
         events::publish_grant_revoked(&env, &owner, &grant_id);
         Ok(())
     }
+
+    pub fn request_access(
+        env: Env,
+        requester: Address,
+        record_id: BytesN<32>,
+        purpose: Symbol,
+        cred: CredentialProof,
+        presence: PresenceProof,
+    ) -> Result<Capability, Error> {
+        requester.require_auth();
+
+        let prepared =
+            prepare_request_access(&env, &requester, &record_id, &purpose, &cred, &presence)?;
+
+        events::publish_access_requested(
+            &env,
+            &requester,
+            &prepared.grant_id,
+            &record_id,
+            &purpose,
+            prepared.record.tier.code(),
+        );
+        storage::mark_nonce_spent(&env, &presence.nonce);
+        if !prepared.existing_grant {
+            storage::set_grant(&env, &prepared.grant_id, &prepared.grant);
+        }
+
+        Ok(Capability {
+            grant_id: prepared.grant_id,
+            locator: prepared.record.locator,
+            commitment: prepared.record.commitment,
+        })
+    }
+}
+
+struct PreparedAccess {
+    grant_id: BytesN<32>,
+    grant: Grant,
+    record: RecordMeta,
+    existing_grant: bool,
+}
+
+fn prepare_request_access(
+    env: &Env,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    cred: &CredentialProof,
+    presence: &PresenceProof,
+) -> Result<PreparedAccess, Error> {
+    verify_credential(env, requester, cred)?;
+    let record = storage::get_record(env, record_id).ok_or(Error::NoSuchRecord)?;
+    verify_presence(env, requester, record_id, &record.owner, presence)?;
+
+    let grant_id = request_access_grant_id(env, requester, record_id, purpose, &cred.cred_id);
+    if let Some(grant) = storage::get_grant(env, &grant_id) {
+        validate_grant(env, requester, record_id, purpose, &record, &grant)?;
+        return Ok(PreparedAccess {
+            grant_id,
+            grant,
+            record,
+            existing_grant: true,
+        });
+    }
+
+    let gtype = authorize_new_grant(env, &record, purpose, cred)?;
+    let grant = Grant {
+        record: record_id.clone(),
+        grantee: requester.clone(),
+        gtype,
+        purpose: purpose.clone(),
+        scope_category: record.category.clone(),
+        expires_at: env.ledger().timestamp() + REQUEST_GRANT_SECONDS,
+        reveal_at: 0,
+        revoked: false,
+        vetoed: false,
+    };
+
+    Ok(PreparedAccess {
+        grant_id,
+        grant,
+        record,
+        existing_grant: false,
+    })
+}
+
+fn request_access_grant_id(
+    env: &Env,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    cred_id: &BytesN<32>,
+) -> BytesN<32> {
+    let preimage = (
+        requester.clone(),
+        record_id.clone(),
+        purpose.clone(),
+        cred_id.clone(),
+    )
+        .to_xdr(env);
+    env.crypto().sha256(&preimage).to_bytes()
+}
+
+fn verify_credential(env: &Env, requester: &Address, cred: &CredentialProof) -> Result<(), Error> {
+    if cred.subject != *requester {
+        return Err(Error::CredentialNotForCaller);
+    }
+
+    if cred.cred_id == BytesN::from_array(env, &[0; 32]) || !is_known_role(env, &cred.role) {
+        return Err(Error::BadCredential);
+    }
+
+    Ok(())
+}
+
+fn authorize_new_grant(
+    env: &Env,
+    record: &RecordMeta,
+    purpose: &Symbol,
+    cred: &CredentialProof,
+) -> Result<GrantType, Error> {
+    match record.tier {
+        Tier::OfflineCard => Err(Error::OfflineTierNotBrokered),
+        Tier::EmergencyBundle => {
+            if is_responder_role(env, &cred.role) || is_clinician_role(env, &cred.role) {
+                Ok(GrantType::BreakGlass)
+            } else {
+                Err(Error::BadCredential)
+            }
+        }
+        Tier::FullHistory => {
+            if !is_clinician_role(env, &cred.role) && !is_institution_role(env, &cred.role) {
+                return Err(Error::BadCredential);
+            }
+            if record.sensitive && *purpose != record.category {
+                return Err(Error::ScopeMismatch);
+            }
+            if record.sensitive {
+                return Err(Error::SensitiveNeedsExplicitGrant);
+            }
+            Ok(GrantType::Normal)
+        }
+    }
+}
+
+fn validate_grant(
+    env: &Env,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    record: &RecordMeta,
+    grant: &Grant,
+) -> Result<(), Error> {
+    if grant.record != *record_id || grant.grantee != *requester || grant.purpose != *purpose {
+        return Err(Error::NoGrant);
+    }
+    if grant.revoked || grant.vetoed {
+        return Err(Error::GrantRevoked);
+    }
+    if env.ledger().timestamp() >= grant.expires_at {
+        return Err(Error::GrantExpired);
+    }
+    if record.sensitive && grant.scope_category != record.category {
+        return Err(Error::ScopeMismatch);
+    }
+
+    Ok(())
+}
+
+fn verify_presence(
+    env: &Env,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    owner: &Address,
+    presence: &PresenceProof,
+) -> Result<(), Error> {
+    let registered_token =
+        storage::get_patient_token(env, owner).ok_or(Error::NoTokenRegistered)?;
+    if registered_token != presence.token_pubkey {
+        return Err(Error::WrongToken);
+    }
+    if env.ledger().timestamp() >= presence.expires_at {
+        return Err(Error::StalePresence);
+    }
+    if storage::has_spent_nonce(env, &presence.nonce) {
+        return Err(Error::NonceReplayed);
+    }
+    if presence.signature == BytesN::from_array(env, &[0; 64]) {
+        return Err(Error::BadPresenceSig);
+    }
+
+    let message = presence_message(env, requester, record_id, presence);
+    env.crypto()
+        .ed25519_verify(&presence.token_pubkey, &message, &presence.signature);
+    Ok(())
+}
+
+fn presence_message(
+    env: &Env,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    presence: &PresenceProof,
+) -> Bytes {
+    let domain = Bytes::from_slice(env, b"hcstellar:presence:v1");
+    (
+        domain,
+        requester.clone(),
+        record_id.clone(),
+        presence.nonce.clone(),
+        presence.expires_at,
+    )
+        .to_xdr(env)
+}
+
+fn is_known_role(env: &Env, role: &Symbol) -> bool {
+    is_clinician_role(env, role)
+        || is_institution_role(env, role)
+        || is_responder_role(env, role)
+        || *role == Symbol::new(env, "patient")
+}
+
+fn is_clinician_role(env: &Env, role: &Symbol) -> bool {
+    *role == Symbol::new(env, "clinician")
+}
+
+fn is_institution_role(env: &Env, role: &Symbol) -> bool {
+    *role == Symbol::new(env, "institution")
+}
+
+fn is_responder_role(env: &Env, role: &Symbol) -> bool {
+    *role == Symbol::new(env, "responder")
 }
 
 #[cfg(test)]

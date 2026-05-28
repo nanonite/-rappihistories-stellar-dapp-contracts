@@ -38,6 +38,25 @@ pub fn publish_grant_revoked(env: &Env, owner: &Address, grant_id: &BytesN<32>) 
         .publish((symbol_short!("grant_rv"), owner.clone()), grant_id.clone());
 }
 
+pub fn publish_access_requested(
+    env: &Env,
+    requester: &Address,
+    grant_id: &BytesN<32>,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    tier_code: u32,
+) {
+    env.events().publish(
+        (symbol_short!("acc_req"), requester.clone()),
+        (
+            grant_id.clone(),
+            record_id.clone(),
+            purpose.clone(),
+            tier_code,
+        ),
+    );
+}
+
 fn category_code(env: &Env, category: &Symbol) -> u32 {
     if *category == Symbol::new(env, "cardiology") {
         1
