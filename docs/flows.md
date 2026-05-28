@@ -1,6 +1,6 @@
 # Contract Flows
 
-Covers implemented contracts: **Identity**, **Medical Record**, and **Access Broker** (schema, record registration, normal grants).
+Covers implemented contracts: **Identity**, **Medical Record**, and **Access Broker** (schema, record registration, normal grants, request_access predicate).
 Remaining contracts (Prescription, Supply Chain, Incentive) are stubs pending implementation.
 
 ---
@@ -12,7 +12,7 @@ graph TB
     subgraph Soroban["Soroban Contracts"]
         ID["Identity\nregister_issuer · issue_credential\nrevoke_credential · verify_credential"]
         MR["Medical Record\ninit · authorize_doctor\nappend_record · get_records"]
-        AB["Access Broker\nregister_record · register_patient_token\ncreate_normal_grant · revoke"]
+        AB["Access Broker\nregister_record · register_patient_token\ncreate_normal_grant · revoke · request_access"]
         RX["Prescription\n⚠ stub"]
         SC["Supply Chain\n⚠ stub"]
         IN["Incentive\n⚠ stub"]
@@ -229,8 +229,8 @@ sequenceDiagram
 
 ## Access Broker Contract
 
-> BKR-1 (schema), BKR-2 (record registration), BKR-3 (normal grants) implemented.
-> BKR-4 through BKR-8 (request_access, break-glass, offline audit, etc.) pending.
+> BKR-1 (schema), BKR-2 (record registration), BKR-3 (normal grants), BKR-4 (request_access predicate) implemented.
+> BKR-5 through BKR-8 (break-glass, offline audit, etc.) pending.
 
 ### Data Model
 
@@ -400,4 +400,73 @@ sequenceDiagram
     AB-->>-Owner: Ok(()) + event: grant_rv
 
     Note over Owner,AB: Errors: NoGrant · NoSuchRecord · Unauthorized
+```
+
+### request_access — Happy Path (BKR-4)
+
+```mermaid
+sequenceDiagram
+    actor Requester
+    participant AB as AccessBrokerContract
+    participant ID as IdentityContract
+
+    Requester->>+AB: request_access(requester, record_id, purpose, cred, presence)
+    AB->>AB: requester.require_auth()
+
+    Note over AB: prepare_request_access (pure — no side effects)
+    AB->>AB: verify_credential: cred.subject == requester ✓ (Hole E)
+    AB->>AB: cred_id non-zero, role known ✓
+    AB->>AB: get_record(record_id) → RecordMeta ✓
+    AB->>AB: verify_presence: get_patient_token(owner) == presence.token_pubkey ✓ (Hole D)
+    AB->>AB: presence.expires_at > now ✓ (Hole B)
+    AB->>AB: has_spent_nonce(nonce) → false ✓ (Hole D)
+    AB->>AB: ed25519_verify(token_pubkey, message, signature) ✓
+    AB->>AB: authorize_new_grant → GrantType per tier
+    AB->>AB: build Grant{expires_at: now+300, reveal_at:0}
+
+    Note over AB: side effects — in this order (Hole I)
+    AB->>AB: publish_access_requested(grant_id, record_id, purpose, tier_code)
+    AB->>AB: mark_nonce_spent(nonce)
+    AB->>AB: set_grant(grant_id, grant)
+
+    AB-->>-Requester: Ok(Capability{grant_id, locator, commitment}) ← no secrets (Hole A)
+```
+
+### request_access — Tier Authorization (BKR-4)
+
+```mermaid
+flowchart TD
+    Start["authorize_new_grant(record, purpose, cred)"] --> T{"record.tier"}
+
+    T -->|OfflineCard| OC["❌ OfflineTierNotBrokered\n(card devices register directly)"]
+
+    T -->|EmergencyBundle| EB{"role?"}
+    EB -->|responder / clinician| EBOk["✅ GrantType::BreakGlass"]
+    EB -->|other| EBErr["❌ BadCredential"]
+
+    T -->|FullHistory| FH{"role?"}
+    FH -->|clinician / institution| FHRole["check sensitive flag"]
+    FH -->|other| FHErr["❌ BadCredential"]
+
+    FHRole --> Sens{"record.sensitive?"}
+    Sens -->|true, purpose ≠ category| SM["❌ ScopeMismatch (Hole F)"]
+    Sens -->|true, purpose = category| SEG["❌ SensitiveNeedsExplicitGrant\n(explicit patient grant required)"]
+    Sens -->|false| FHOk["✅ GrantType::Normal"]
+```
+
+### request_access — Existing Grant Re-use (BKR-4)
+
+```mermaid
+sequenceDiagram
+    actor Requester
+    participant AB as AccessBrokerContract
+
+    Note over Requester,AB: grant_id is deterministic — same requester+record+purpose+cred_id always maps to same key
+    Requester->>+AB: request_access(...) with same cred_id
+    AB->>AB: compute grant_id → has_grant → true
+    AB->>AB: validate_grant: not revoked/vetoed, expires_at > now (Hole B), scope ok
+    AB->>AB: existing_grant = true → skip set_grant
+    AB->>AB: publish_access_requested (audit still emitted)
+    AB->>AB: mark_nonce_spent (fresh nonce each call)
+    AB-->>-Requester: Ok(Capability{grant_id, locator, commitment})
 ```
