@@ -21,6 +21,37 @@ impl AccessBrokerContract {
         1
     }
 
+    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+
+        if storage::get_admin(&env).is_some() {
+            return Err(Error::AlreadyInitialized);
+        }
+
+        storage::set_admin(&env, &admin);
+        Ok(())
+    }
+
+    pub fn admin(env: Env) -> Result<Address, Error> {
+        storage::get_admin(&env).ok_or(Error::NotInitialized)
+    }
+
+    pub fn configure_issuer_root(
+        env: Env,
+        admin: Address,
+        issuer_root: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        storage::set_issuer_root(&env, &issuer_root);
+        Ok(())
+    }
+
+    pub fn issuer_root(env: Env) -> Result<Address, Error> {
+        storage::get_issuer_root(&env).ok_or(Error::IssuerRootNotConfigured)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn register_record(
         env: Env,
@@ -171,6 +202,15 @@ impl AccessBrokerContract {
             commitment: prepared.record.commitment,
         })
     }
+}
+
+fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
+    let admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
+    if admin != *caller {
+        return Err(Error::Unauthorized);
+    }
+
+    Ok(())
 }
 
 struct PreparedAccess {

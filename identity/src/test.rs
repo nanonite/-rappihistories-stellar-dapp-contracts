@@ -76,6 +76,7 @@ fn registers_issuer_and_issues_verifiable_credential() {
 
     let (client, admin, issuer, subject) = setup_client(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     let cred_id = client.issue_credential(&issuer, &subject, &Role::Clinician, &200);
 
@@ -83,7 +84,37 @@ fn registers_issuer_and_issues_verifiable_credential() {
 }
 
 #[test]
-fn register_issuer_is_admin_only_after_bootstrap() {
+fn initialize_records_admin_once() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, _, _) = setup_client(&env);
+    let next_admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    assert_eq!(client.admin(), admin);
+    assert_eq!(
+        client.try_initialize(&next_admin),
+        Err(Ok(IdentityError::AlreadyInitialized))
+    );
+}
+
+#[test]
+fn register_issuer_requires_initialization() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, issuer, _) = setup_client(&env);
+
+    assert_eq!(
+        client.try_register_issuer(&admin, &issuer),
+        Err(Ok(IdentityError::NotInitialized))
+    );
+}
+
+#[test]
+fn register_issuer_is_admin_only_after_initialization() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -91,6 +122,7 @@ fn register_issuer_is_admin_only_after_bootstrap() {
     let non_admin = Address::generate(&env);
     let second_issuer = Address::generate(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     assert_eq!(
         client.try_register_issuer(&non_admin, &second_issuer),
@@ -120,6 +152,7 @@ fn revoked_credential_no_longer_verifies() {
 
     let (client, admin, issuer, subject) = setup_client(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     let cred_id = client.issue_credential(&issuer, &subject, &Role::Clinician, &200);
 
@@ -136,6 +169,7 @@ fn admin_can_revoke_issuer_credential() {
 
     let (client, admin, issuer, subject) = setup_client(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     let cred_id = client.issue_credential(&issuer, &subject, &Role::Clinician, &200);
 
@@ -152,6 +186,7 @@ fn expired_credential_does_not_verify() {
 
     let (client, admin, issuer, subject) = setup_client(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     let cred_id = client.issue_credential(&issuer, &subject, &Role::Clinician, &200);
 
@@ -168,6 +203,7 @@ fn wrong_subject_does_not_verify() {
     let (client, admin, issuer, subject) = setup_client(&env);
     let other_subject = Address::generate(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     let cred_id = client.issue_credential(&issuer, &subject, &Role::Clinician, &200);
 
@@ -182,6 +218,7 @@ fn wrong_role_does_not_verify() {
 
     let (client, admin, issuer, subject) = setup_client(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     let cred_id = client.issue_credential(&issuer, &subject, &Role::Clinician, &200);
 
@@ -196,6 +233,7 @@ fn issue_credential_rejects_expiration_at_or_before_now() {
 
     let (client, admin, issuer, subject) = setup_client(&env);
 
+    client.initialize(&admin);
     client.register_issuer(&admin, &issuer);
     assert_eq!(
         client.try_issue_credential(&issuer, &subject, &Role::Clinician, &100),

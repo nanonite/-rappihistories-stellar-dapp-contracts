@@ -147,6 +147,54 @@ fn broker_proof_and_capability_types_match_contract_boundary() {
 }
 
 #[test]
+fn initialize_records_broker_admin_once() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_client(&env);
+    let next_admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    assert_eq!(client.admin(), admin);
+    assert_eq!(
+        client.try_initialize(&next_admin),
+        Err(Ok(Error::AlreadyInitialized))
+    );
+}
+
+#[test]
+fn configure_issuer_root_is_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_client(&env);
+    let non_admin = Address::generate(&env);
+    let issuer_root = Address::generate(&env);
+    let next_issuer_root = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.configure_issuer_root(&admin, &issuer_root);
+
+    assert_eq!(client.issuer_root(), issuer_root);
+    assert_eq!(
+        client.try_configure_issuer_root(&non_admin, &next_issuer_root),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn configure_issuer_root_requires_initialization() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_client(&env);
+    let issuer_root = Address::generate(&env);
+
+    assert_eq!(
+        client.try_configure_issuer_root(&admin, &issuer_root),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+#[test]
 fn register_record_stores_and_returns_record_meta() {
     let env = Env::default();
     env.mock_all_auths();

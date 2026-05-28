@@ -19,13 +19,28 @@ impl IdentityContract {
         1
     }
 
+    pub fn initialize(env: Env, admin: Address) -> Result<(), IdentityError> {
+        admin.require_auth();
+
+        if storage::get_admin(&env).is_some() {
+            return Err(IdentityError::AlreadyInitialized);
+        }
+
+        storage::set_admin(&env, &admin);
+        Ok(())
+    }
+
+    pub fn admin(env: Env) -> Result<Address, IdentityError> {
+        storage::get_admin(&env).ok_or(IdentityError::NotInitialized)
+    }
+
     pub fn register_issuer(
         env: Env,
         admin: Address,
         issuer_address: Address,
     ) -> Result<(), IdentityError> {
         admin.require_auth();
-        require_admin_or_bootstrap(&env, &admin)?;
+        require_admin(&env, &admin)?;
 
         if storage::has_issuer(&env, &issuer_address) {
             return Err(IdentityError::IssuerAlreadyRegistered);
@@ -127,18 +142,6 @@ impl IdentityContract {
             && credential.subject == expected_subject
             && credential.role == expected_role
     }
-}
-
-fn require_admin_or_bootstrap(env: &Env, admin: &Address) -> Result<(), IdentityError> {
-    if let Some(stored_admin) = storage::get_admin(env) {
-        if stored_admin != *admin {
-            return Err(IdentityError::Unauthorized);
-        }
-    } else {
-        storage::set_admin(env, admin);
-    }
-
-    Ok(())
 }
 
 fn require_admin(env: &Env, caller: &Address) -> Result<(), IdentityError> {

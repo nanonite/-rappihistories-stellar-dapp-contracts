@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+- GOV-1 — Contract admin bootstrap and upgrade authority policy (#17)
+
 ### Added
 
 ### Fixed
