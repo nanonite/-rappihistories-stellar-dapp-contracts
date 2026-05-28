@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- INF — Cache contract-runner dependency layer (#25)
 - CON-2 — Contract WASM artifact contract for local deployment runner (#21)
 - SC-5 — Stellar Classic asset mapping for batches and serialized units (#20)
 - BKR-8 — Offline card device registry and finite read-budget controls (#19)
