@@ -5,8 +5,11 @@ extern crate std;
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
-    testutils::{Address as _, BytesN as _, Events as _},
-    Address, Bytes, BytesN, Env, Symbol,
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, BytesN as _, Events as _, Ledger as _,
+    },
+    Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
 const PRESENCE_SIGNING_KEY: [u8; 32] = [7; 32];
@@ -123,6 +126,66 @@ fn storage_uses_explicit_broker_storage_classes() {
 }
 
 #[test]
+fn critical_broker_state_is_renewed_on_write() {
+    let env = Env::default();
+    env.ledger().set_timestamp(100);
+    let contract_id = env.register(AccessBrokerContract, ());
+
+    env.as_contract(&contract_id, || {
+        let admin = Address::generate(&env);
+        let issuer_root = Address::generate(&env);
+        let patient = Address::generate(&env);
+        let grantee = Address::generate(&env);
+        let record_id = BytesN::random(&env);
+        let grant_id = BytesN::random(&env);
+        let token_pubkey = BytesN::random(&env);
+        let category = Symbol::new(&env, "cardiology");
+        let record = RecordMeta {
+            owner: patient.clone(),
+            tier: Tier::FullHistory,
+            category: category.clone(),
+            sensitive: false,
+            commitment: BytesN::random(&env),
+            locator: Bytes::from_slice(&env, &[1, 2, 3]),
+        };
+        let normal_grant = grant(
+            &env,
+            &record_id,
+            &grantee,
+            GrantType::Normal,
+            Symbol::new(&env, "treatment"),
+            category,
+        );
+
+        storage::set_admin(&env, &admin);
+        storage::set_issuer_root(&env, &issuer_root);
+        storage::set_record(&env, &record_id, &record);
+        storage::set_patient_token(&env, &patient, &token_pubkey);
+        storage::set_grant(&env, &grant_id, &normal_grant);
+
+        assert!(env.storage().instance().get_ttl() >= storage::CRITICAL_STATE_TTL_THRESHOLD);
+        assert!(
+            env.storage()
+                .persistent()
+                .get_ttl(&storage::DataKey::Record(record_id))
+                >= storage::CRITICAL_STATE_TTL_THRESHOLD
+        );
+        assert!(
+            env.storage()
+                .persistent()
+                .get_ttl(&storage::DataKey::PatientToken(patient))
+                >= storage::CRITICAL_STATE_TTL_THRESHOLD
+        );
+        assert!(
+            env.storage()
+                .persistent()
+                .get_ttl(&storage::DataKey::Grant(grant_id))
+                >= storage::CRITICAL_STATE_TTL_THRESHOLD
+        );
+    });
+}
+
+#[test]
 fn broker_proof_and_capability_types_match_contract_boundary() {
     let env = Env::default();
     let subject = Address::generate(&env);
@@ -192,6 +255,29 @@ fn configure_issuer_root_requires_initialization() {
         client.try_configure_issuer_root(&admin, &issuer_root),
         Err(Ok(Error::NotInitialized))
     );
+}
+
+#[test]
+fn renew_critical_state_is_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_client(&env);
+    let non_admin = Address::generate(&env);
+    let record_ids: Vec<BytesN<32>> = Vec::new(&env);
+    let patients: Vec<Address> = Vec::new(&env);
+    let grant_ids: Vec<BytesN<32>> = Vec::new(&env);
+
+    assert_eq!(
+        client.try_renew_critical_state(&admin, &record_ids, &patients, &grant_ids),
+        Err(Ok(Error::NotInitialized))
+    );
+
+    client.initialize(&admin);
+    assert_eq!(
+        client.try_renew_critical_state(&non_admin, &record_ids, &patients, &grant_ids),
+        Err(Ok(Error::Unauthorized))
+    );
+    client.renew_critical_state(&admin, &record_ids, &patients, &grant_ids);
 }
 
 #[test]
@@ -966,6 +1052,48 @@ fn request_access_rejects_revoked_existing_grant() {
     );
 }
 
+#[test]
+fn request_access_rejects_existing_grant_before_reveal_at() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id, patient) = setup_client_with_id(&env);
+    let requester = Address::generate(&env);
+    let record_id = BytesN::random(&env);
+    let category = Symbol::new(&env, "emergency");
+    let purpose = Symbol::new(&env, "emergency");
+    register_broker_record(
+        &env,
+        &client,
+        &patient,
+        &record_id,
+        Tier::EmergencyBundle,
+        &category,
+        false,
+    );
+    register_patient_token(&env, &client, &patient);
+    let cred = credential(&env, &requester, "responder");
+    let presence = presence(&env, &requester, &record_id, env.ledger().timestamp() + 300);
+    store_request_grant_with_controls(
+        &env,
+        &contract_id,
+        &requester,
+        &record_id,
+        &purpose,
+        &cred,
+        category,
+        GrantType::BreakGlass,
+        false,
+        false,
+        env.ledger().timestamp() + 30,
+        env.ledger().timestamp() + 300,
+    );
+
+    assert_eq!(
+        client.try_request_access(&requester, &record_id, &purpose, &cred, &presence),
+        Err(Ok(Error::NoGrant))
+    );
+}
+
 fn setup_client(env: &Env) -> (AccessBrokerContractClient<'_>, Address) {
     let (client, _, owner) = setup_client_with_id(env);
     (client, owner)
@@ -1075,18 +1203,49 @@ fn store_request_grant(
     revoked: bool,
     expires_at: u64,
 ) {
+    store_request_grant_with_controls(
+        env,
+        contract_id,
+        requester,
+        record_id,
+        purpose,
+        cred,
+        scope_category,
+        GrantType::Normal,
+        revoked,
+        false,
+        0,
+        expires_at,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_request_grant_with_controls(
+    env: &Env,
+    contract_id: &Address,
+    requester: &Address,
+    record_id: &BytesN<32>,
+    purpose: &Symbol,
+    cred: &CredentialProof,
+    scope_category: Symbol,
+    gtype: GrantType,
+    revoked: bool,
+    vetoed: bool,
+    reveal_at: u64,
+    expires_at: u64,
+) {
     env.as_contract(contract_id, || {
         let grant_id = request_access_grant_id(env, requester, record_id, purpose, &cred.cred_id);
         let grant = Grant {
             record: record_id.clone(),
             grantee: requester.clone(),
-            gtype: GrantType::Normal,
+            gtype,
             purpose: purpose.clone(),
             scope_category,
             expires_at,
-            reveal_at: 0,
+            reveal_at,
             revoked,
-            vetoed: false,
+            vetoed,
         };
         storage::set_grant(env, &grant_id, &grant);
     });

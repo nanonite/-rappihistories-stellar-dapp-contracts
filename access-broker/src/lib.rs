@@ -8,7 +8,7 @@ pub mod types;
 pub use errors::Error;
 pub use types::{Capability, CredentialProof, Grant, GrantType, PresenceProof, RecordMeta, Tier};
 
-use soroban_sdk::{contract, contractimpl, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 const REQUEST_GRANT_SECONDS: u64 = 300;
 
@@ -50,6 +50,35 @@ impl AccessBrokerContract {
 
     pub fn issuer_root(env: Env) -> Result<Address, Error> {
         storage::get_issuer_root(&env).ok_or(Error::IssuerRootNotConfigured)
+    }
+
+    pub fn renew_critical_state(
+        env: Env,
+        admin: Address,
+        record_ids: Vec<BytesN<32>>,
+        patients: Vec<Address>,
+        grant_ids: Vec<BytesN<32>>,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        if storage::get_issuer_root(&env).is_some() {
+            storage::renew_instance_ttl(&env);
+        }
+
+        for record_id in record_ids {
+            storage::renew_record(&env, &record_id);
+        }
+        for patient in patients {
+            storage::renew_patient_token(&env, &patient);
+        }
+        for grant_id in grant_ids {
+            if let Some(grant) = storage::get_grant(&env, &grant_id) {
+                storage::renew_active_normal_grant(&env, &grant_id, &grant);
+            }
+        }
+
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -339,6 +368,9 @@ fn validate_grant(
     }
     if env.ledger().timestamp() >= grant.expires_at {
         return Err(Error::GrantExpired);
+    }
+    if env.ledger().timestamp() < grant.reveal_at {
+        return Err(Error::NoGrant);
     }
     if record.sensitive && grant.scope_category != record.category {
         return Err(Error::ScopeMismatch);

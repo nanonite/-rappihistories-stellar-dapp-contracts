@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Security
+- BKR-7 — Critical-state TTL renewal and rent-failure invariants (#18)
 - GOV-1 — Contract admin bootstrap and upgrade authority policy (#17)
 
 ### Added
