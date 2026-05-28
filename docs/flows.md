@@ -1,6 +1,6 @@
 # Contract Flows
 
-Covers implemented contracts: **Identity**, **Medical Record**, and **Access Broker** (schema/types).
+Covers implemented contracts: **Identity**, **Medical Record**, and **Access Broker** (schema, record registration, normal grants).
 Remaining contracts (Prescription, Supply Chain, Incentive) are stubs pending implementation.
 
 ---
@@ -12,7 +12,7 @@ graph TB
     subgraph Soroban["Soroban Contracts"]
         ID["Identity\nregister_issuer · issue_credential\nrevoke_credential · verify_credential"]
         MR["Medical Record\ninit · authorize_doctor\nappend_record · get_records"]
-        AB["Access Broker\nschema · types · storage layout"]
+        AB["Access Broker\nregister_record · register_patient_token\ncreate_normal_grant · revoke"]
         RX["Prescription\n⚠ stub"]
         SC["Supply Chain\n⚠ stub"]
         IN["Incentive\n⚠ stub"]
@@ -227,9 +227,10 @@ sequenceDiagram
 
 ---
 
-## Access Broker Contract (BKR-1 — schema & types)
+## Access Broker Contract
 
-> Implementation functions (request_access, break-glass, etc.) are pending BKR-2 through BKR-8.
+> BKR-1 (schema), BKR-2 (record registration), BKR-3 (normal grants) implemented.
+> BKR-4 through BKR-8 (request_access, break-glass, offline audit, etc.) pending.
 
 ### Data Model
 
@@ -337,4 +338,66 @@ flowchart TD
     E["expires_at / reveal_at checks"] --> F["always vs env.ledger().timestamp()\nNEVER rely on storage TTL for security"]
 
     G["SpentNonce"] --> H["temporary · TTL = MAX_PRESENCE_WINDOW (300 ledgers)\nreplay guard for PresenceProof nonces"]
+```
+
+### Record Registration & Patient Token (BKR-2)
+
+```mermaid
+sequenceDiagram
+    actor Owner as Patient / Owner
+    participant AB as AccessBrokerContract
+
+    Owner->>+AB: register_record(owner, record_id, tier, category, sensitive, locator, commitment)
+    AB->>AB: owner.require_auth()
+    AB->>AB: has_record(record_id) → false
+    AB->>AB: set_record(record_id, RecordMeta{owner, tier, category, sensitive, commitment, locator})
+    AB-->>-Owner: Ok(()) + event: record_registered(tier_code, category)
+
+    Owner->>+AB: register_patient_token(patient, token_pubkey)
+    AB->>AB: patient.require_auth()
+    AB->>AB: has_patient_token(patient) → false
+    AB->>AB: set_patient_token(patient, token_pubkey)
+    AB-->>-Owner: Ok(()) + event: pt_token
+
+    Note over Owner,AB: Errors: RecordAlreadyExists · PatientTokenAlreadyRegistered
+```
+
+### Normal Grant Creation (BKR-3)
+
+```mermaid
+sequenceDiagram
+    actor Patient
+    actor Grantee
+    participant AB as AccessBrokerContract
+
+    Patient->>+AB: create_normal_grant(patient, grantee, record_id, purpose, scope_category, expires_at)
+    AB->>AB: patient.require_auth()
+    AB->>AB: get_record(record_id) → RecordMeta{owner:patient} ✓
+    AB->>AB: expires_at > now ✓
+    AB->>AB: sha256(grantee ‖ record_id ‖ now) → grant_id
+    AB->>AB: set_normal_grant(grant_id, Grant{gtype:Normal, reveal_at:0, revoked:false, vetoed:false})
+    AB-->>-Patient: Ok(grant_id) + event: grant_cr
+
+    Grantee->>+AB: get_grant(grant_id)
+    AB-->>-Grantee: Grant{expires_at, scope_category, ...}
+
+    Note over Patient,AB: Errors: NoSuchRecord · Unauthorized · InvalidExpiration · GrantAlreadyExists
+```
+
+### Grant Revocation (BKR-3)
+
+```mermaid
+sequenceDiagram
+    actor Owner as Patient / Owner
+    participant AB as AccessBrokerContract
+
+    Owner->>+AB: revoke(owner, grant_id)
+    AB->>AB: owner.require_auth()
+    AB->>AB: get_grant(grant_id) → Grant ✓
+    AB->>AB: get_record(grant.record) → RecordMeta{owner} ✓
+    AB->>AB: record.owner == owner ✓
+    AB->>AB: grant.revoked = true → set_grant(grant_id, grant)
+    AB-->>-Owner: Ok(()) + event: grant_rv
+
+    Note over Owner,AB: Errors: NoGrant · NoSuchRecord · Unauthorized
 ```
