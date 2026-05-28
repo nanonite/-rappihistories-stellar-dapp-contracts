@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, Symbol};
 
 pub fn publish_record_registered(
     env: &Env,
@@ -6,11 +6,18 @@ pub fn publish_record_registered(
     record_id: &BytesN<32>,
     tier_code: u32,
     category: &Symbol,
+    locator: &Bytes,
+    commitment: &BytesN<32>,
 ) {
-    let category_code = category_code(env, category);
     env.events().publish(
         (symbol_short!("rec_reg"), owner.clone()),
-        (record_id.clone(), tier_code, category_code),
+        (
+            record_id.clone(),
+            tier_code,
+            category.clone(),
+            locator.clone(),
+            commitment.clone(),
+        ),
     );
 }
 
@@ -25,11 +32,20 @@ pub fn publish_grant_created(
     grant_id: &BytesN<32>,
     record_id: &BytesN<32>,
     grantee: &Address,
+    purpose: &Symbol,
+    scope_category: &Symbol,
     expires_at: u64,
 ) {
     env.events().publish(
         (symbol_short!("grant_cr"), patient.clone(), grantee.clone()),
-        (grant_id.clone(), record_id.clone(), expires_at),
+        (
+            grant_id.clone(),
+            record_id.clone(),
+            expires_at,
+            0_u64,
+            purpose.clone(),
+            scope_category.clone(),
+        ),
     );
 }
 
@@ -55,20 +71,4 @@ pub fn publish_access_requested(
             tier_code,
         ),
     );
-}
-
-fn category_code(env: &Env, category: &Symbol) -> u32 {
-    if *category == Symbol::new(env, "cardiology") {
-        1
-    } else if *category == Symbol::new(env, "medication") {
-        2
-    } else if *category == Symbol::new(env, "allergy") {
-        3
-    } else if *category == Symbol::new(env, "behavioral_health") {
-        4
-    } else if *category == Symbol::new(env, "emergency") {
-        5
-    } else {
-        0
-    }
 }

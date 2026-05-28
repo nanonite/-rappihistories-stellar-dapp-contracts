@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_IMAGE=docker.io/library/rust:1.83-slim-bookworm
+ARG RUST_IMAGE=docker.io/library/rust:1-slim-bookworm
 
 FROM ${RUST_IMAGE} AS contract-deps
 WORKDIR /workspace/components/contracts
@@ -77,7 +77,7 @@ WORKDIR /workspace
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates libdbus-1-3 \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl libdbus-1-3 \
   && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p components/contracts/target/wasm32-unknown-unknown/release

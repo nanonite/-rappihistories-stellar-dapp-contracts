@@ -103,12 +103,20 @@ impl AccessBrokerContract {
             tier: tier.clone(),
             category: category.clone(),
             sensitive,
-            commitment,
-            locator: locator_bytes,
+            commitment: commitment.clone(),
+            locator: locator_bytes.clone(),
         };
 
         storage::set_record(&env, &record_id, &meta);
-        events::publish_record_registered(&env, &owner, &record_id, tier.code(), &category);
+        events::publish_record_registered(
+            &env,
+            &owner,
+            &record_id,
+            tier.code(),
+            &category,
+            &locator_bytes,
+            &commitment,
+        );
         Ok(())
     }
 
@@ -157,7 +165,15 @@ impl AccessBrokerContract {
             return Err(Error::InvalidExpiration);
         }
 
-        let preimage = (grantee.clone(), record_id.clone(), now).to_xdr(&env);
+        let preimage = (
+            patient.clone(),
+            grantee.clone(),
+            record_id.clone(),
+            purpose.clone(),
+            scope_category.clone(),
+            expires_at,
+        )
+            .to_xdr(&env);
         let grant_id = env.crypto().sha256(&preimage).to_bytes();
         if storage::has_grant(&env, &grant_id) {
             return Err(Error::GrantAlreadyExists);
@@ -167,8 +183,8 @@ impl AccessBrokerContract {
             record: record_id.clone(),
             grantee: grantee.clone(),
             gtype: GrantType::Normal,
-            purpose,
-            scope_category,
+            purpose: purpose.clone(),
+            scope_category: scope_category.clone(),
             expires_at,
             reveal_at: 0,
             revoked: false,
@@ -176,7 +192,16 @@ impl AccessBrokerContract {
         };
 
         storage::set_normal_grant(&env, &grant_id, &grant);
-        events::publish_grant_created(&env, &patient, &grant_id, &record_id, &grantee, expires_at);
+        events::publish_grant_created(
+            &env,
+            &patient,
+            &grant_id,
+            &record_id,
+            &grantee,
+            &purpose,
+            &scope_category,
+            expires_at,
+        );
         Ok(grant_id)
     }
 
